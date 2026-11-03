@@ -1,39 +1,48 @@
+# src/data_validator.py
 import logging
-
 import pandas as pd
+
 
 logger = logging.getLogger(__name__)
 
 
-def validate_dataframe(
-    df: pd.DataFrame,
-    required_columns: list[str] | None = None,
-    numeric_columns: list[str] | None = None,
-) -> pd.DataFrame:
-    """Check required columns and coerce numeric columns.
+def validate_dataframe(df, required_columns, numeric_columns):
+    """Validate the DataFrame and return valid data.
 
-    Rows whose value in a numeric column is present but not numeric are
-    removed (blank/missing values are kept for later missing-value handling).
-    Raises ValueError if a required column is absent.
+    required_columns: a list of column names that must exist.
+    numeric_columns: a list of column names whose values should be numeric.
     """
-    required_columns = required_columns or []
-    numeric_columns = numeric_columns or []
-
-    missing = [c for c in required_columns if c not in df.columns]
-    if missing:
-        raise ValueError(f"Missing required columns: {missing}")
+    for col in required_columns:
+        if col not in df.columns:
+            logger.error("Missing required column: %s", col)
+            raise ValueError(f"Missing required column: {col}")
 
     rows_before = len(df)
-    result = df.copy()
-    for col in numeric_columns:
-        if col not in result.columns:
-            raise ValueError(f"Numeric column not found: {col}")
-        converted = pd.to_numeric(result[col], errors="coerce")
-        invalid = converted.isna() & result[col].notna()
-        for value in result.loc[invalid, col].unique():
-            logger.warning("Invalid value in %s: %s", col, value)
-        result = result.loc[~invalid].copy()
-        result[col] = converted.loc[result.index]
+    df = df.copy()
 
-    logger.debug("Validation: %s → %s rows", rows_before, len(result))
-    return result.reset_index(drop=True)
+    for col in numeric_columns:
+        if col not in df.columns:
+            logger.error("Missing numeric column: %s", col)
+            raise ValueError(f"Missing numeric column: {col}")
+
+        invalid_rows = []
+        for i, value in df[col].items():
+            if pd.notna(value):
+                try:
+                    float(value)
+                except ValueError:
+                    logger.warning("Invalid value in %s: %s", col, value)
+                    invalid_rows.append(i)
+
+        if invalid_rows:
+            logger.warning(
+                "Removed %s rows with invalid numeric values in %s",
+                len(invalid_rows), col,
+            )
+        df = df.drop(index=invalid_rows)
+
+        # convert to a numeric data type
+        df[col] = pd.to_numeric(df[col])
+
+    logger.debug("Validation: %s → %s rows", rows_before, len(df))
+    return df

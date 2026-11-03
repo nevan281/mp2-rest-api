@@ -1,3 +1,4 @@
+# data_processor.py
 import logging
 
 import pandas as pd
@@ -5,74 +6,98 @@ import pandas as pd
 logger = logging.getLogger(__name__)
 
 
-def remove_duplicates(df: pd.DataFrame) -> pd.DataFrame:
+def remove_duplicates(df):
+    """Remove duplicate rows."""
     before = len(df)
-    result = df.drop_duplicates().reset_index(drop=True)
+    result = df.drop_duplicates()
     logger.debug("remove_duplicates: %s → %s rows", before, len(result))
     return result
 
 
-def handle_missing(df: pd.DataFrame, axis: str = "rows") -> pd.DataFrame:
-    before = len(df)
+def handle_missing(df, axis="rows"):
+    """Drop rows or columns containing missing values."""
     if axis == "rows":
-        result = df.dropna(axis=0).reset_index(drop=True)
+        before = len(df)
+        result = df.dropna(axis=0)
+        logger.debug("handle_missing: %s → %s rows", before, len(result))
     elif axis == "columns":
+        before = len(df.columns)
         result = df.dropna(axis=1)
+        logger.debug("handle_missing: %s → %s columns", before, len(result.columns))
     else:
-        raise ValueError(f"Unsupported missing-value axis: {axis!r}")
-    logger.debug("handle_missing: %s → %s rows", before, len(result))
+        logger.error("Unsupported axis for handle_missing: %s", axis)
+        raise ValueError(f"Unsupported axis for handle_missing: {axis}")
     return result
 
 
-def remove_outliers(
-    df: pd.DataFrame,
-    columns: list[str],
-    method: str = "iqr",
-    threshold: float = 1.5,
-) -> pd.DataFrame:
+def remove_outliers(df, columns, method, threshold):
+    """Remove outliers from the specified numeric columns."""
     if method not in ("iqr", "zscore"):
-        raise ValueError(f"Unsupported outlier method: {method!r}")
-    before = len(df)
-    result = df.copy()
+        logger.error("Unsupported outlier method: %s", method)
+        raise ValueError(f"Unsupported outlier method: {method}")
+
+    result = df
     for col in columns:
         if col not in result.columns:
-            raise ValueError(f"Outlier column not found: {col}")
-        series = pd.to_numeric(result[col], errors="coerce")
+            logger.warning("Column not found: %s", col)
+            continue
+        if not pd.api.types.is_numeric_dtype(result[col]):
+            logger.warning("Column is not numeric: %s", col)
+            continue
+
+        series = result[col]
         if method == "iqr":
-            q1, q3 = series.quantile(0.25), series.quantile(0.75)
+            q1 = series.quantile(0.25)
+            q3 = series.quantile(0.75)
             iqr = q3 - q1
-            keep = series.between(q1 - threshold * iqr, q3 + threshold * iqr)
-        else:
+            lower = q1 - threshold * iqr
+            upper = q3 + threshold * iqr
+            is_outlier = (series < lower) | (series > upper)
+        else:  # zscore
             std = series.std()
-            keep = (
-                pd.Series(True, index=series.index)
-                if not std
-                else ((series - series.mean()).abs() / std) <= threshold
-            )
-        result = result.loc[keep | series.isna()]
-    result = result.reset_index(drop=True)
-    logger.debug("remove_outliers (%s): %s → %s rows", method, before, len(result))
+            if std == 0 or pd.isna(std):
+                is_outlier = pd.Series(False, index=series.index)
+            else:
+                is_outlier = ((series - series.mean()) / std).abs() > threshold
+
+        removed = int(is_outlier.sum())
+        result = result[~is_outlier]
+        logger.debug(
+            "%s: method=%s, threshold=%s, removed=%s",
+            col, method, threshold, removed,
+        )
     return result
 
 
-def process_data(df: pd.DataFrame, config: dict) -> pd.DataFrame:
-    """Apply duplicate, missing-value and outlier steps from a config dict."""
-    settings = config.get("processing", config)
-    result = df.copy()
+def process_data(df, config):
+    """Apply the processing steps enabled in the configuration."""
+    settings = config["processing"]
 
     if settings.get("remove_duplicates", False):
-        result = remove_duplicates(result)
+        df = remove_duplicates(df)
 
     missing = settings.get("missing", {})
     if missing.get("enabled", False):
-        result = handle_missing(result, axis=missing.get("axis", "rows"))
+        df = handle_missing(df, axis=missing.get("axis", "rows"))
 
     outliers = settings.get("outliers", {})
     if outliers.get("enabled", False):
-        result = remove_outliers(
-            result,
+        df = remove_outliers(
+            df,
             columns=outliers.get("columns", []),
             method=outliers.get("method", "iqr"),
             threshold=outliers.get("threshold", 1.5),
         )
-    return result
+    return df
+
+
+def create_cleaning_report(df_before, df_after):
+    """Return a dictionary summarizing the cleaning results."""
+    return {
+        "rows_before": len(df_before),
+        "rows_after": len(df_after),
+        "rows_removed": len(df_before) - len(df_after),
+        "columns_before": len(df_before.columns),
+        "columns_after": len(df_after.columns),
+        "columns_removed": len(df_before.columns) - len(df_after.columns),
+    }
